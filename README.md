@@ -22,13 +22,17 @@ Open `index.html` in any modern browser — no build step or server. Keep
   knee joints, all fused with smooth-min. The body is egg-shaped, rear-weighted,
   with disc hands, thumbs, and flat foot pads. Arms and legs attach to the body
   deliberately: only the upper arm and hip blend into the torso.
-- **Face** — flat cartoon decals projected onto the head: white eyes with black
-  outlines and moving pupils, occasional blinks, and a full 15-viseme set
-  (sil, PP, FF, TH, DD, kk, CH, SS, nn, RR, aa, E, I, O, U) with teeth and
-  tongue layers. Idle moods add an open smile, frown, and small "o".
+- **Face** — flat cartoon decals projected onto the head: pear-shaped eyes that
+  taper toward the brow (one a touch larger than the other), heavy upper lids
+  whose lash lines cut the eye outline, moving pupils, occasional blinks, and a
+  full 15-viseme set (sil, PP, FF, TH, DD, kk, CH, SS, nn, RR, aa, E, I, O, U)
+  with teeth and tongue layers. Idle moods add an open smile, frown, and small
+  "o".
 - **Material** — dark cherry gummy: wrapped lighting, a red subsurface glow
   estimated by probing the SDF for thickness, cool rim light, warm bounce, and a
-  wet two-lobe highlight.
+  wet two-lobe highlight. Fake refraction bends a view ray through the skin at
+  grazing angles (per-channel, so the silhouette splits into faint rainbow
+  fringes) and focuses a wobbling red caustic web onto the boards at his feet.
 - **Performance** — idle breathing and arm sway, a short dance every 13 seconds
   (hip sway, bounce, alternating arm raises and foot taps), plus the poke wobble.
   While he dances, his mouth performs the viseme sequence into the microphone.
@@ -52,6 +56,8 @@ Open `index.html` in any modern browser — no build step or server. Keep
 - `faceDecals()` — eyes, pupils, blink shape, mouths, and their outlines.
 - `VISEMES` / `SONG` in the script — the 15 mouth presets and the singing order.
 - `shadeChar()` — cherry colour, gummy translucency, three-point lighting.
+- `fakeRefraction()` / `causticWeb()` — the refractive rim, its dispersion, and
+  the caustic it throws on the stage floor.
 - `mapMic()` / `shadeMic()` — microphone geometry and metal materials.
 - `woodColor()`, `backdrop()` — stage floor and curtains.
 - `make-voice.sh` — regenerate Bob's Kokoro intro (needs a valid OpenRouter key).
