@@ -31,18 +31,20 @@ Open `index.html` in any modern browser — no build step or server. Keep
   wet two-lobe highlight.
 - **Performance** — idle breathing and arm sway, a short dance every 13 seconds
   (hip sway, bounce, alternating arm raises and foot taps), plus the poke wobble.
-  While he dances he sings the viseme sequence into the microphone.
+  While he dances, his mouth performs the viseme sequence into the microphone.
 - **Stage** — a round wooden-plank stage, deep red velvet curtains with vertical
   folds and a warm halo, and three-point lighting: warm key, cool edge, warm
   bounce.
-- **Microphone** — a ribbon mic on a tripod boom stand at mouth height, with a
-  ribbed grille, chrome caps, yoke, collar, counterweight, and a floor cable.
+- **Microphone** — a slightly oversized shiny-brass ribbon mic on a chrome
+  tripod boom stand at mouth height, with a ribbed brass grille, polished brass
+  caps, brass yoke and counterweight, and a floor cable.
 - **Voice** — the “Hear Bob” button plays his intro and drives the mouth from a
-  baked 30 fps lip-sync track (`bob-lipsync.js`). The included audio is a local
-  macOS `say` placeholder because the OpenRouter key in this environment is
-  expired. `./make-voice.sh` regenerates it with `hexgrad/kokoro-82m`
-  (voice `am_puck`) when a valid `OPENROUTER_API_KEY` is available, then rebuilds
-  the lip-sync track with `make-lipsync.py`.
+  baked 30 fps lip-sync track (`bob-lipsync.js`). The included audio is a
+  **Tiny Voca M2** male voice rendered in the browser at
+  [tiny-voca.n4ze3m.com](https://tiny-voca.n4ze3m.com/) (24 kHz), and the track
+  is generated from that WAV. To use Kokoro instead, run `./make-voice.sh` with
+  a valid `OPENROUTER_API_KEY`; `make-lipsync.py` rebuilds the track for either
+  voice.
 
 ## Tuning
 

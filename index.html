@@ -354,9 +354,10 @@ float mapChar(vec3 p) {
 
 const vec3  MIC_C     = vec3(0.56, 1.52, 0.58);
 const float MIC_YAW   = -1.80;
+const float MIC_SCALE = 1.30;
 const vec3  STAND_HUB = vec3(1.25, -0.32, 0.55);
 const vec3  POLE_TOP  = vec3(1.25, 1.18, 0.55);
-const vec3  BOOM_END  = vec3(0.56, 1.39, 0.58);
+const vec3  BOOM_END  = vec3(0.56, 1.34, 0.58);
 
 vec3 micLocal(vec3 p) {
   vec3 r = p - MIC_C;
@@ -372,15 +373,15 @@ vec2 mapMic(vec3 p) {
   vec2 res = vec2(1e9, 0.0);
 
   /* ribbon head */
-  vec3 q = micLocal(p);
-  float dHead = sdRoundBox(q, vec3(0.040, 0.075, 0.012), 0.026);
+  vec3 q = micLocal(p) / MIC_SCALE;
+  float dHead = sdRoundBox(q, vec3(0.040, 0.075, 0.012), 0.026) * MIC_SCALE;
   res = opU2(res, vec2(dHead, 2.0));
 
   /* yoke */
   float yoke = sdCapsule(q, vec3(-0.070, -0.140, 0.0), vec3(-0.070, 0.010, 0.0), 0.009);
   yoke = min(yoke, sdCapsule(q, vec3(0.070, -0.140, 0.0), vec3(0.070, 0.010, 0.0), 0.009));
   yoke = min(yoke, sdCapsule(q, vec3(-0.070, -0.140, 0.0), vec3(0.070, -0.140, 0.0), 0.009));
-  res = opU2(res, vec2(yoke, 1.0));
+  res = opU2(res, vec2(yoke * MIC_SCALE, 3.0));
 
   /* tripod */
   for (int i = 0; i < 3; i++) {
@@ -389,7 +390,7 @@ vec2 mapMic(vec3 p) {
     foot.y = FLOOR_Y + 0.016;
     float leg = sdCapsule(p, STAND_HUB + vec3(0.0, 0.03, 0.0), foot, 0.018);
     res = opU2(res, vec2(leg, 1.0));
-    res = opU2(res, vec2(sdEllipsoid(p - foot, vec3(0.048, 0.026, 0.048)), 3.0));
+    res = opU2(res, vec2(sdEllipsoid(p - foot, vec3(0.048, 0.026, 0.048)), 4.0));
   }
 
   /* pole, collar */
@@ -405,7 +406,7 @@ vec2 mapMic(vec3 p) {
   vec3 cw = POLE_TOP + vec3(0.20, 0.07, 0.02);
   boom = min(boom, sdCapsule(p, POLE_TOP, cw, 0.014));
   res = opU2(res, vec2(boom, 1.0));
-  res = opU2(res, vec2(sdCapsule(p, cw, cw + vec3(0.10, 0.0, 0.0), 0.045), 2.0));
+  res = opU2(res, vec2(sdCapsule(p, cw, cw + vec3(0.10, 0.0, 0.0), 0.045), 3.0));
   res = opU2(res, vec2(sdEllipsoid(p - POLE_TOP, vec3(0.045)), 1.0));
 
   /* cable: boom -> pole -> floor loop */
@@ -416,7 +417,7 @@ vec2 mapMic(vec3 p) {
   cable = min(cable, sdCapsule(p, vec3(1.36, -0.513, 0.65), vec3(1.44, -0.513, 0.79), 0.006));
   cable = min(cable, sdCapsule(p, vec3(1.44, -0.513, 0.79), vec3(1.31, -0.513, 0.86), 0.006));
   cable = min(cable, sdCapsule(p, vec3(1.31, -0.513, 0.86), vec3(1.235, -0.513, 0.72), 0.006));
-  res = opU2(res, vec2(cable, 3.0));
+  res = opU2(res, vec2(cable, 4.0));
 
   return res;
 }
@@ -697,34 +698,51 @@ vec3 shadeMic(vec3 p, vec3 n, vec3 rd, float ao, float mat) {
 
   vec3 base;
   float gloss, specI;
-  if (mat < 1.5) { base = vec3(0.50, 0.51, 0.55); gloss = 180.0; specI = 1.5; }
-  else if (mat < 2.5) { base = vec3(0.055, 0.055, 0.065); gloss = 90.0; specI = 0.9; }
-  else { base = vec3(0.018, 0.017, 0.020); gloss = 36.0; specI = 0.22; }
+  if (mat < 1.5) {
+    // chrome tripod / boom
+    base = vec3(0.50, 0.51, 0.55); gloss = 180.0; specI = 1.5;
+  } else if (mat < 2.5) {
+    // shiny brass ribbon head
+    base = vec3(0.78, 0.52, 0.19); gloss = 120.0; specI = 1.5;
+  } else if (mat < 3.5) {
+    // brass yoke / counterweight
+    base = vec3(0.64, 0.42, 0.15); gloss = 110.0; specI = 1.25;
+  } else {
+    // rubber feet / cable
+    base = vec3(0.018, 0.017, 0.020); gloss = 36.0; specI = 0.22;
+  }
 
-  // fake studio environment: warm below, cool above
+  float brass = step(1.5, mat) * (1.0 - step(3.5, mat));
+
+  // chrome reflects the cool room; brass reflects warm stage light
   vec3 env = mix(vec3(0.020, 0.018, 0.022), vec3(0.55, 0.58, 0.66), smoothstep(-0.7, 0.9, n.y));
   env += vec3(0.18, 0.05, 0.03) * (1.0 - smoothstep(-0.2, 0.8, n.y));
+  vec3 brassEnv = mix(vec3(0.060, 0.035, 0.012), vec3(0.85, 0.64, 0.32), smoothstep(-0.7, 0.9, n.y));
+  env = mix(env, brassEnv, brass);
 
-  vec3 col = base * (0.25 + 0.75 * env);
+  vec3 col = base * (0.30 + 0.85 * env);
   col += keyC * pow(nh, gloss) * specI;
-  col += edgeC * fres * 0.60;
+  col += vec3(1.0, 0.72, 0.30) * pow(nh, 18.0) * 0.16 * brass;
+  vec3 rimCol = mix(edgeC, vec3(1.0, 0.68, 0.28), brass);
+  col += rimCol * fres * 0.60;
   col += base * 0.12 * ao;
 
   if (mat > 1.5 && mat < 2.5) {
-    // grille and chrome caps on the ribbon head
-    vec3 q = micLocal(p);
+    // grille and polished brass caps on the ribbon head
+    vec3 q = micLocal(p) / MIC_SCALE;
     float face = smoothstep(0.030, 0.038, abs(q.z))
                * (1.0 - smoothstep(0.052, 0.064, abs(q.x)))
                * (1.0 - smoothstep(0.074, 0.088, abs(q.y)));
     float ribs = smoothstep(0.30, 0.70, 0.5 + 0.5 * sin(q.y * 170.0));
-    vec3 grille = vec3(0.52, 0.53, 0.57) * (0.55 + 0.45 * ribs);
-    grille += keyC * pow(nh, 120.0) * 0.9;
+    vec3 grille = vec3(1.0, 0.78, 0.34) * (0.55 + 0.45 * ribs);
+    grille += keyC * pow(nh, 120.0) * 1.2;
     grille += edgeC * fres * 0.25;
     col = mix(col, grille, face * 0.92);
 
     float cap = smoothstep(0.080, 0.090, abs(q.y));
-    vec3 chrome = vec3(0.55, 0.56, 0.60) * (0.45 + 0.55 * env) + keyC * pow(nh, 220.0) * 1.2;
-    col = mix(col, chrome, cap);
+    vec3 polished = vec3(1.0, 0.80, 0.40) * (0.45 + 0.55 * env)
+                  + keyC * pow(nh, 220.0) * 1.6;
+    col = mix(col, polished, cap);
   }
   return col;
 }
