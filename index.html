@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Bob — a squishy SDF performer</title>
+<style>
+  :root {
+    --ink: #f3e2c8;
+    --cream: #140a0c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--cream);
+    color: var(--ink);
+    font-family: ui-rounded, "SF Pro Rounded", "Nunito", system-ui, -apple-system, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: grab;
+    touch-action: none;
+  }
+  canvas.dragging { cursor: grabbing; }
+
+  .hud {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: clamp(16px, 3vw, 32px);
+  }
+  .title {
+    font-size: clamp(12px, 1.1vw, 14px);
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    opacity: 0.65;
+    text-shadow: 0 2px 10px rgba(0, 0, 0, 0.6);
+  }
+  .hint {
+    align-self: center;
+    font-size: clamp(11px, 1vw, 13px);
+    letter-spacing: 0.03em;
+    opacity: 0.9;
+    text-align: center;
+    line-height: 1.6;
+    padding: 7px 14px;
+    border-radius: 999px;
+    background: rgba(22, 11, 12, 0.60);
+    border: 1px solid rgba(255, 220, 190, 0.18);
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.28);
+  }
+  .hint b { font-weight: 700; opacity: 0.9; }
+
+  .voice-btn {
+    position: fixed;
+    top: clamp(16px, 3vw, 32px);
+    right: clamp(16px, 3vw, 32px);
+    z-index: 5;
+    pointer-events: auto;
+    appearance: none;
+    color: var(--ink);
+    background: rgba(22, 11, 12, 0.62);
+    border: 1px solid rgba(255, 220, 190, 0.22);
+    border-radius: 999px;
+    padding: 9px 15px;
+    font: inherit;
+    font-size: clamp(11px, 1vw, 12px);
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.30);
+    transition: background 160ms ease, border-color 160ms ease;
+  }
+  .voice-btn:hover { background: rgba(52, 21, 22, 0.82); }
+  .voice-btn.playing {
+    background: rgba(120, 28, 36, 0.72);
+    border-color: rgba(255, 200, 170, 0.45);
+  }
+
+  #fallback {
+    position: fixed;
+    inset: 0;
+    display: none;
+    place-items: center;
+    padding: 24px;
+    text-align: center;
+    font-size: 15px;
+    line-height: 1.7;
+    background: var(--cream);
+  }
+  #fallback.show { display: grid; }
+</style>
+</head>
+<body>
+
+<canvas id="c" role="img" aria-label="A soft, round, cherry-red blob character with two arms, two legs, big eyes and a smile"></canvas>
+
+<button id="voiceBtn" class="voice-btn" type="button">▶ Hear Bob</button>
+<audio id="voice" src="bob-intro.wav" preload="auto" playsinline></audio>
+
+<div class="hud">
+  <div class="title">Bob</div>
+  <div class="hint"><b>Drag</b> to orbit &nbsp;·&nbsp; <b>Scroll</b> to zoom &nbsp;·&nbsp; <b>Poke</b> him</div>
+</div>
+
+<div id="fallback">
+  <div>
+    This little guy needs <strong>WebGL2</strong>, which your browser doesn’t seem to have.<br />
+    Try a recent desktop Chrome, Safari, or Firefox.
+  </div>
+</div>
+
+<script id="vert" type="x-shader/x-vertex">#version 300 es
+void main() {
+  // Fullscreen triangle, no buffers needed.
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+</script>
+
+<script id="frag" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+
+out vec4 fragColor;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform float uPoke;
+uniform vec3  uCam;
+uniform vec3  uTarget;
+uniform float uLook;
+uniform float uBlink;
+uniform float uMouth;
+uniform float uDance;
+uniform float uSpeak;
+uniform float uVisW;
+uniform float uVisH;
+uniform float uVisCorner;
+uniform float uVisTeeth;
+uniform float uVisTongue;
+
+const float FLOOR_Y = -0.52;
+
+/* ---------- little helpers ---------- */
+
+float smin(float a, float b, float k) {
+  float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+float sdEllipsoid(vec3 p, vec3 r) {
+  float k0 = length(p / r);
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0) / k1;
+}
+
+float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
+  vec3 pa = p - a;
+  vec3 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+  return length(pa - ba * h) - r;
+}
+
+float sdRoundBox(vec3 p, vec3 b, float r) {
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+}
+
+float sdRoundCone(vec3 p, vec3 a, vec3 b, float r1, float r2) {
+  // exact cone with spherical caps (iq)
+  vec3 ba = b - a;
+  float l2 = dot(ba, ba);
+  float rr = r1 - r2;
+  float a2 = l2 - rr * rr;
+  float il2 = 1.0 / l2;
+  vec3 pa = p - a;
+  float y = dot(pa, ba);
+  float z = y - l2;
+  vec3 xv = pa * l2 - ba * y;
+  float x2 = dot(xv, xv);
+  float y2 = y * y * l2;
+  float z2 = z * z * l2;
+  float k = sign(rr) * rr * rr * x2;
+  if (sign(z) * a2 * z2 > k) return sqrt(x2 + z2) * il2 - r2;
+  if (sign(y) * a2 * y2 < k) return sqrt(x2 + y2) * il2 - r1;
+  return (sqrt(x2 * a2 * il2) + y * rr) * il2 - r1;
+}
+
+float hash12(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+}
+
+/* ---------- flat decal helpers (face space) ---------- */
+
+float sdEllipse2(vec2 p, vec2 r) {
+  float k0 = length(p / r);
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0) / max(k1, 1e-6);
+}
+
+float sdCircle2(vec2 p, float r) {
+  return length(p) - r;
+}
+
+float sdSeg2(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a;
+  vec2 ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-6), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+float sdMouthCurve(vec2 p, float halfWidth, float curve, float r) {
+  vec2 prev = vec2(-halfWidth, 0.0);
+  float d = 1e9;
+  for (int i = 1; i <= 6; i++) {
+    float u = float(i) / 6.0;
+    float x = mix(-halfWidth, halfWidth, u);
+    vec2 pt = vec2(x, -curve * (1.0 - (x / halfWidth) * (x / halfWidth)));
+    d = min(d, sdSeg2(p, prev, pt) - r);
+    prev = pt;
+  }
+  return d;
+}
+
+float inkMask(float d, float aa) {
+  return 1.0 - smoothstep(-aa, aa, d);
+}
+
+// black-outline pass, then the colored fill on top
+vec3 paintDecal(vec3 col, float d, float outline, vec3 fill, vec3 ink, float aa, float alpha) {
+  col = mix(col, ink, inkMask(d - outline, aa) * alpha);
+  col = mix(col, fill, inkMask(d, aa) * alpha);
+  return col;
+}
+
+/* ---------- body animation ---------- */
+
+float anim(out float sq, out float br, out float sway, out float bounce) {
+  float t  = uTime;
+  float beat = t * 6.4;
+  br = sin(t * 1.45);
+  sway = uDance * 0.100 * sin(beat);
+  bounce = uDance * 0.036 * (0.5 - 0.5 * cos(beat * 2.0));
+  // breathe, poke wobble, and a bouncy dance squash
+  sq = 0.035 * br + 0.17 * uPoke * sin(t * 17.0) + 0.040 * uDance * sin(beat * 2.0);
+  return t;
+}
+
+vec3 headCenter(float sq, float br, float sway, float bounce) {
+  return vec3(sway * 1.2, 1.77 - 0.10 * sq + 0.025 * br + bounce * 1.1, 0.01);
+}
+
+/* ---------- the character ---------- */
+
+float mapChar(vec3 p) {
+  float sq, br, sway, bounce;
+  float t = anim(sq, br, sway, bounce);
+  vec3 hc = headCenter(sq, br, sway, bounce);
+  float blend = 0.30 + 0.03 * br;
+
+  /* --- soft egg body: heavy low belly, narrower chest, weight at the back --- */
+  vec3 bellyC = vec3(sway, 0.66 - 0.04 * sq + bounce, -0.065);
+  vec3 bellyR = vec3(0.76 * (1.0 - 0.25 * sq), 0.62 * (1.0 + 0.45 * sq), 0.72 * (1.0 - 0.25 * sq));
+  float d = sdEllipsoid(p - bellyC, bellyR);
+
+  vec3 chestC = vec3(sway, 1.05 - 0.03 * sq + bounce, 0.020);
+  vec3 chestR = vec3(0.58 * (1.0 - 0.20 * sq), 0.38 * (1.0 + 0.30 * sq), 0.54);
+  d = smin(d, sdEllipsoid(p - chestC, chestR), 0.30);
+
+  /* --- head: tapered to the crown and melted into the shoulders --- */
+  vec3 hra = vec3(0.50 * (1.0 - 0.10 * sq), 0.48 * (1.0 + 0.08 * sq), 0.49 * (1.0 - 0.10 * sq));
+  vec3 qh = p - hc;
+  float hu = clamp(qh.y / hra.y, 0.0, 1.0);
+  float taper = 1.0 - 0.10 * smoothstep(0.35, 1.0, hu);
+  vec3 qs = vec3(qh.x / taper, qh.y, qh.z / taper);
+  d = smin(d, sdEllipsoid(qs, hra) * taper, blend);
+
+  /* --- arms + legs --- */
+  for (int i = 0; i < 2; i++) {
+    float s  = float(i) * 2.0 - 1.0;
+    float ph = (i == 0) ? 0.0 : 1.7;
+
+    // arm: shoulder -> elbow -> thin disc hand
+    vec3 A = vec3(0.52 * s, 1.04, 0.02);
+    float wav = sin(t * 1.9 + ph);
+    vec3 B = vec3(0.94 * s, 0.86 + 0.05 * wav, 0.08);
+    vec3 C = vec3(1.02 * s, 0.58 + 0.09 * wav, 0.18);
+    B.y += 0.10 * uPoke * sin(t * 16.0 + s);
+    C.x += 0.06 * s * uPoke * sin(t * 16.0 + 1.0);
+    C.y += 0.16 * uPoke * sin(t * 15.0 + ph);
+
+    // the dance: whole arm travels with the body, then alternates upward
+    A.x += sway; A.y += bounce;
+    B.x += sway; B.y += bounce;
+    C.x += sway; C.y += bounce;
+    float armUp = uDance * 0.28 * max(0.0, s * sin(t * 6.4));
+    B.y += armUp * 0.60;
+    C.y += armUp;
+    C.x += s * uDance * 0.05 * sin(t * 6.4);
+    C.z += uDance * 0.08 * sin(t * 6.4 + 1.0);
+
+    float dUpper = sdCapsule(p, A, B, 0.16);
+    d = smin(d, dUpper, 0.15);
+
+    // forearm + hand + thumb: only the elbow blends, the rest stays clear of the belly
+    float dArm = sdCapsule(p, B, C, 0.13);
+    dArm = smin(dArm, sdEllipsoid(p - C, vec3(0.19, 0.19, 0.09)), 0.09);
+
+    // thumb on the inner-top rim
+    vec3 thumbC = C + vec3(-0.140 * s, 0.135, 0.035);
+    dArm = smin(dArm, sdEllipsoid(p - thumbC, vec3(0.070, 0.110, 0.075)), 0.045);
+    dArm = smin(dArm, dUpper, 0.07);
+
+    d = min(d, dArm);
+
+    // leg: thigh + shin with a soft knee joint
+    vec3 LA = vec3(0.25 * s, 0.42, 0.0);
+    vec3 LB = vec3(0.30 * s, -0.24, 0.03);
+    LA.x += sway * 0.8;
+    LA.y += bounce;
+    float tap = uDance * 0.110 * max(0.0, -s * sin(t * 6.4));
+    LB.y += tap;
+    LB.z += tap * 0.40;
+
+    float kneeBend = 0.100 * (1.0 + 0.35 * uDance * (0.5 - 0.5 * cos(t * 12.8))) + 0.05 * uPoke;
+    vec3 LK = mix(LA, LB, 0.75) + vec3(0.0, 0.0, kneeBend);
+
+    float dLeg = sdRoundCone(p, LA, LK, 0.20, 0.155);
+    dLeg = smin(dLeg, sdRoundCone(p, LK, LB, 0.155, 0.13), 0.06);
+    dLeg = smin(dLeg, sdEllipsoid(p - LK, vec3(0.160, 0.135, 0.160)), 0.05);
+
+    // squashed foot pad, sunk into the floor
+    vec3 footC = vec3(0.30 * s, -0.455 + tap, 0.13 + tap * 0.40);
+    float dFoot = sdEllipsoid(p - footC, vec3(0.25, 0.115, 0.31));
+    dLeg = smin(dLeg, dFoot, 0.10);
+
+    d = smin(d, dLeg, 0.15);
+  }
+
+  return d;
+}
+
+/* ---------- ribbon microphone on a floor stand ---------- */
+
+const vec3  MIC_C     = vec3(0.56, 1.52, 0.58);
+const float MIC_YAW   = -1.80;
+const vec3  STAND_HUB = vec3(1.25, -0.32, 0.55);
+const vec3  POLE_TOP  = vec3(1.25, 1.18, 0.55);
+const vec3  BOOM_END  = vec3(0.56, 1.39, 0.58);
+
+vec3 micLocal(vec3 p) {
+  vec3 r = p - MIC_C;
+  float c = cos(MIC_YAW), s = sin(MIC_YAW);
+  return vec3(c * r.x - s * r.z, r.y, s * r.x + c * r.z);
+}
+
+vec2 opU2(vec2 a, vec2 b) {
+  return (a.x < b.x) ? a : b;
+}
+
+vec2 mapMic(vec3 p) {
+  vec2 res = vec2(1e9, 0.0);
+
+  /* ribbon head */
+  vec3 q = micLocal(p);
+  float dHead = sdRoundBox(q, vec3(0.040, 0.075, 0.012), 0.026);
+  res = opU2(res, vec2(dHead, 2.0));
+
+  /* yoke */
+  float yoke = sdCapsule(q, vec3(-0.070, -0.140, 0.0), vec3(-0.070, 0.010, 0.0), 0.009);
+  yoke = min(yoke, sdCapsule(q, vec3(0.070, -0.140, 0.0), vec3(0.070, 0.010, 0.0), 0.009));
+  yoke = min(yoke, sdCapsule(q, vec3(-0.070, -0.140, 0.0), vec3(0.070, -0.140, 0.0), 0.009));
+  res = opU2(res, vec2(yoke, 1.0));
+
+  /* tripod */
+  for (int i = 0; i < 3; i++) {
+    float ang = 0.55 + float(i) * 2.0944;
+    vec3 foot = STAND_HUB + vec3(cos(ang) * 0.33, 0.0, sin(ang) * 0.33);
+    foot.y = FLOOR_Y + 0.016;
+    float leg = sdCapsule(p, STAND_HUB + vec3(0.0, 0.03, 0.0), foot, 0.018);
+    res = opU2(res, vec2(leg, 1.0));
+    res = opU2(res, vec2(sdEllipsoid(p - foot, vec3(0.048, 0.026, 0.048)), 3.0));
+  }
+
+  /* pole, collar */
+  float lower = sdCapsule(p, STAND_HUB, vec3(STAND_HUB.x, 0.46, STAND_HUB.z), 0.026);
+  float upper = sdCapsule(p, vec3(STAND_HUB.x, 0.46, STAND_HUB.z), POLE_TOP, 0.017);
+  res = opU2(res, vec2(min(lower, upper), 1.0));
+  float collar = sdCapsule(p, vec3(STAND_HUB.x, 0.425, STAND_HUB.z),
+                              vec3(STAND_HUB.x, 0.490, STAND_HUB.z), 0.034);
+  res = opU2(res, vec2(collar, 1.0));
+
+  /* boom, counterweight and clamp */
+  float boom = sdCapsule(p, POLE_TOP, BOOM_END, 0.014);
+  vec3 cw = POLE_TOP + vec3(0.20, 0.07, 0.02);
+  boom = min(boom, sdCapsule(p, POLE_TOP, cw, 0.014));
+  res = opU2(res, vec2(boom, 1.0));
+  res = opU2(res, vec2(sdCapsule(p, cw, cw + vec3(0.10, 0.0, 0.0), 0.045), 2.0));
+  res = opU2(res, vec2(sdEllipsoid(p - POLE_TOP, vec3(0.045)), 1.0));
+
+  /* cable: boom -> pole -> floor loop */
+  float cable = sdCapsule(p, BOOM_END, vec3(1.06, 1.26, 0.57), 0.006);
+  cable = min(cable, sdCapsule(p, vec3(1.06, 1.26, 0.57), vec3(1.235, 1.18, 0.565), 0.006));
+  cable = min(cable, sdCapsule(p, vec3(1.235, 1.18, 0.565), vec3(1.235, -0.513, 0.565), 0.006));
+  cable = min(cable, sdCapsule(p, vec3(1.235, -0.513, 0.565), vec3(1.36, -0.513, 0.65), 0.006));
+  cable = min(cable, sdCapsule(p, vec3(1.36, -0.513, 0.65), vec3(1.44, -0.513, 0.79), 0.006));
+  cable = min(cable, sdCapsule(p, vec3(1.44, -0.513, 0.79), vec3(1.31, -0.513, 0.86), 0.006));
+  cable = min(cable, sdCapsule(p, vec3(1.31, -0.513, 0.86), vec3(1.235, -0.513, 0.72), 0.006));
+  res = opU2(res, vec2(cable, 3.0));
+
+  return res;
+}
+
+vec2 sceneMap(vec3 p) {
+  float dc = mapChar(p);
+  vec2 dm = mapMic(p);
+  return (dm.x < dc) ? dm : vec2(dc, 0.0);
+}
+
+vec2 raymarch(vec3 ro, vec3 rd, float tmax) {
+  float t = 0.02;
+  for (int i = 0; i < 110; i++) {
+    vec2 h = sceneMap(ro + rd * t);
+    if (h.x < 0.0015 * t) return vec2(t, h.y);
+    t += h.x * 0.9;
+    if (t > tmax) break;
+  }
+  return vec2(-1.0, 0.0);
+}
+
+vec3 calcNormal(vec3 p) {
+  float e = 0.0012;
+  return normalize(vec3(
+    sceneMap(p + vec3(e, 0.0, 0.0)).x - sceneMap(p - vec3(e, 0.0, 0.0)).x,
+    sceneMap(p + vec3(0.0, e, 0.0)).x - sceneMap(p - vec3(0.0, e, 0.0)).x,
+    sceneMap(p + vec3(0.0, 0.0, e)).x - sceneMap(p - vec3(0.0, 0.0, e)).x
+  ));
+}
+
+float softShadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
+  float res = 1.0;
+  float t = mint;
+  for (int i = 0; i < 28; i++) {
+    float h = sceneMap(ro + rd * t).x;
+    if (h < 0.001) return 0.0;
+    res = min(res, k * h / t);
+    t += clamp(h, 0.02, 0.30);
+    if (t > maxt) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+
+float calcAO(vec3 p, vec3 n) {
+  float occ = 0.0;
+  float sca = 1.0;
+  for (int i = 0; i < 5; i++) {
+    float h = 0.012 + 0.09 * float(i);
+    float d = sceneMap(p + n * h).x;
+    occ += (h - d) * sca;
+    sca *= 0.82;
+  }
+  return clamp(1.0 - 1.5 * occ, 0.0, 1.0);
+}
+
+/* ---------- lighting ---------- */
+
+/* ---------- stage & backdrop ---------- */
+
+const float CURTAIN_R = 10.5;
+const float CURTAIN_TOP = 6.5;
+
+vec3 backdrop(vec3 ro, vec3 rd) {
+  // camera sits inside a cylindrical velvet room
+  float a = dot(rd.xz, rd.xz);
+  float b = dot(ro.xz, rd.xz);
+  float c = dot(ro.xz, ro.xz) - CURTAIN_R * CURTAIN_R;
+  float t = -1.0;
+  if (a > 1e-5) {
+    float disc = b * b - a * c;
+    if (disc > 0.0) t = (-b + sqrt(disc)) / a;
+  }
+  vec3 dark = vec3(0.018, 0.012, 0.016);
+  if (t < 0.0) return dark;
+
+  vec3 hit = ro + rd * t;
+  if (hit.y > CURTAIN_TOP || hit.y < FLOOR_Y) return dark;
+
+  // vertical folds
+  float ang = atan(hit.z, hit.x);
+  float fold = 0.5 + 0.5 * sin(ang * 46.0 + 0.55 * sin(hit.y * 0.9));
+  fold = smoothstep(0.15, 0.85, fold);
+
+  vec3 inward = -normalize(vec3(hit.x, 0.0, hit.z));
+  vec3 Lkey  = normalize(vec3(0.45, 0.95, 0.55));
+  vec3 Ledge = normalize(vec3(-0.65, 0.55, -0.75));
+  float k = clamp(dot(inward, Lkey), 0.0, 1.0);
+  float e = clamp(dot(inward, Ledge), 0.0, 1.0);
+
+  vec3 deep   = vec3(0.070, 0.004, 0.010);
+  vec3 bright = vec3(0.230, 0.014, 0.022);
+  vec3 velvet = mix(deep, bright, fold);
+  vec3 col = velvet * (0.30 + 0.90 * k + 0.40 * e);
+
+  // warm halo behind him, so his silhouette separates from the drapes
+  float halo = exp(-(hit.x * hit.x * 0.18 + (hit.y - 1.25) * (hit.y - 1.25) * 0.14));
+  col += vec3(0.24, 0.055, 0.030) * halo * 0.9;
+
+  // heavier shadow at the hem and under the top border
+  col *= 0.55 + 0.45 * smoothstep(FLOOR_Y, FLOOR_Y + 1.0, hit.y);
+  col *= 1.0 - 0.30 * smoothstep(4.2, CURTAIN_TOP, hit.y);
+  return col;
+}
+
+vec3 woodColor(vec2 xz) {
+  float r = length(xz);
+  float px = xz.x / 0.55;
+  float id = floor(px);
+  float f = fract(px);
+  float seam = smoothstep(0.0, 0.035, f) * smoothstep(1.0, 0.965, f);
+  float grain = 0.5 + 0.5 * sin(xz.y * 7.0 + sin(xz.y * 1.6 + id * 2.3) * 2.0 + id * 9.0);
+  float tone = 0.72 + 0.28 * hash12(vec2(id, 4.1));
+  vec3 wood = vec3(0.30, 0.17, 0.095) * tone;
+  wood *= 0.78 + 0.22 * grain;
+  wood *= 0.30 + 0.70 * seam;
+
+  float onStage = 1.0 - smoothstep(5.90, 6.35, r);
+  vec3 surround = vec3(0.055, 0.025, 0.022);
+  vec3 c = mix(surround, wood, onStage);
+  c += vec3(0.18, 0.11, 0.05) * exp(-pow((r - 6.10) * 7.0, 2.0)) * 0.35;
+  return c;
+}
+
+vec3 faceDecals(vec3 col, vec3 p, vec3 hc, vec3 n) {
+  vec3 q = p - hc;
+  vec2 f = q.xy;
+
+  // only on the front of the head, and not smeared over the silhouette
+  float face = smoothstep(0.335, 0.365, q.z);
+  face *= 1.0 - smoothstep(0.52, 0.60, length(vec2(q.x, q.y + 0.02)));
+  face *= smoothstep(-0.02, 0.18, n.z);
+  if (face < 0.002) return col;
+
+  const vec3 INK = vec3(0.085, 0.075, 0.09);
+  float blink = clamp(uBlink, 0.0, 1.0);
+  float sad = (uMouth > 0.5 && uMouth < 1.5) ? 1.0 : 0.0;
+  float surprised = (uMouth > 1.5) ? 1.0 : 0.0;
+
+  // eyes: white ovals with ink outlines, moving pupils, occasional blink
+  float eyeSquash = mix(1.0 - 0.10 * sad, 0.055, blink);
+  float eyeWide = 1.0 + 0.05 * surprised;
+  for (int i = 0; i < 2; i++) {
+    float s = float(i) * 2.0 - 1.0;
+    vec2 ec = vec2(0.175 * s, 0.030);
+    float dEye = sdEllipse2(f - ec, vec2(0.135 * eyeWide, 0.150 * eyeSquash));
+    float aa = max(fwidth(dEye), 0.0005);
+    col = paintDecal(col, dEye, 0.014, vec3(1.0, 0.995, 0.97), INK, aa, face);
+
+    vec2 pc = ec + vec2(uLook * 0.050, -0.012 * sad);
+    float dPup = max(sdCircle2(f - pc, 0.052), dEye);
+    float aaP = max(fwidth(dPup), 0.0005);
+    float pupilA = face * (1.0 - blink);
+    col = mix(col, INK, inkMask(dPup, aaP) * pupilA);
+
+    float dGlint = max(sdCircle2(f - (pc + vec2(-0.015, 0.017)), 0.013), dEye);
+    col = mix(col, vec3(1.0), inkMask(dGlint, aaP) * pupilA);
+  }
+
+  // mouth: shrinks a little during blinks
+  float pop = 1.0 - 0.28 * blink * (1.0 - uSpeak);
+  vec2 mo = (f - vec2(0.0, -0.215)) / pop;
+
+  if (uSpeak > 0.5) {
+    // parametric viseme mouth: a curved oval, optional teeth + tongue
+    float vw = max(uVisW, 0.010);
+    float vh = max(uVisH, 0.004);
+    float xx = clamp(mo.x / vw, -1.0, 1.0);
+    vec2 qm = vec2(mo.x, mo.y + uVisCorner * (1.0 - xx * xx));
+
+    float dM = sdEllipse2(qm, vec2(vw, vh));
+    float aa = max(fwidth(dM), 0.0005);
+    col = paintDecal(col, dM, 0.011, vec3(0.10, 0.012, 0.020), INK, aa, face);
+
+    if (uVisTeeth > 0.002) {
+      float dT = sdEllipse2(qm - vec2(0.0, vh * 0.55), vec2(vw * 0.78, max(vh * 0.42, 0.006)));
+      dT = max(dT, dM);
+      col = mix(col, vec3(0.99, 0.96, 0.89),
+                inkMask(dT, max(fwidth(dT), 0.0005)) * uVisTeeth * face);
+    }
+    if (uVisTongue > 0.002) {
+      float dTg = sdEllipse2(qm + vec2(0.0, vh * 0.55), vec2(vw * 0.55, max(vh * 0.45, 0.005)));
+      dTg = max(dTg, dM);
+      col = mix(col, vec3(1.0, 0.46, 0.52),
+                inkMask(dTg, max(fwidth(dTg), 0.0005)) * uVisTongue * face);
+    }
+  } else if (uMouth < 0.5) {
+    // open smile (half-ellipse, flat top) with a tongue
+    vec2 mp = mo - vec2(0.0, 0.030);
+    float dM = max(sdEllipse2(mp, vec2(0.105, 0.075)), mp.y);
+    float aa = max(fwidth(dM), 0.0005);
+    col = paintDecal(col, dM, 0.013, vec3(0.12, 0.012, 0.022), INK, aa, face);
+
+    float dT = max(sdEllipse2(mp - vec2(0.0, -0.043), vec2(0.048, 0.028)), dM);
+    col = mix(col, vec3(1.0, 0.48, 0.53), inkMask(dT, max(fwidth(dT), 0.0005)) * face);
+  } else if (uMouth < 1.5) {
+    // frown, drawn as a thick curved line
+    float dM = sdMouthCurve(mo, 0.100, -0.050, 0.021);
+    float aa = max(fwidth(dM), 0.0005);
+    col = paintDecal(col, dM, 0.010, vec3(0.12, 0.012, 0.022), INK, aa, face);
+  } else {
+    // small surprised "o"
+    float dM = sdEllipse2(mo, vec2(0.050, 0.060));
+    float aa = max(fwidth(dM), 0.0005);
+    col = paintDecal(col, dM, 0.013, vec3(0.12, 0.012, 0.022), INK, aa, face);
+  }
+
+  return col;
+}
+
+vec3 shadeChar(vec3 p, vec3 n, vec3 rd, float ao) {
+  float sq, br, sway, bounce;
+  float t = anim(sq, br, sway, bounce);
+  vec3 hc = headCenter(sq, br, sway, bounce);
+
+  // dark cherry gummy, with a slightly lighter cherry blush
+  vec3 alb = vec3(0.47, 0.025, 0.050);
+  vec3 sssTint = vec3(1.00, 0.16, 0.18);
+
+  float chL = length(p - (hc + vec3(-0.29, -0.10, 0.36)));
+  float chR = length(p - (hc + vec3( 0.29, -0.10, 0.36)));
+  float blush = exp(-chL * chL * 30.0) + exp(-chR * chR * 30.0);
+  alb = mix(alb, vec3(0.92, 0.30, 0.30), clamp(blush * 0.35, 0.0, 0.35));
+  alb *= 0.93 + 0.10 * smoothstep(-0.2, 1.7, p.y);
+
+  vec3 L  = normalize(vec3(0.45, 0.95, 0.55));   // key: warm, high front-right
+  vec3 Le = normalize(vec3(-0.80, 0.50, -0.60)); // edge: cool, behind-left
+  vec3 Lb = normalize(vec3(0.10, -0.55, 0.65));  // bounce: warm boards, from below
+  vec3 keyC    = vec3(1.55, 1.36, 1.08);
+  vec3 edgeC   = vec3(0.42, 0.60, 1.00);
+  vec3 bounceC = vec3(0.72, 0.40, 0.20);
+  vec3 fillC   = vec3(0.070, 0.090, 0.140);
+  vec3 skyC    = vec3(0.030, 0.040, 0.060);
+
+  float ndl  = dot(n, L);
+  float wrap = clamp((ndl + 0.4) / 1.4, 0.0, 1.0);
+
+  vec3 col = alb * keyC * wrap;
+  col += alb * fillC * clamp(dot(n, normalize(vec3(-0.75, 0.05, 0.45))) * 0.5 + 0.5, 0.0, 1.0) * ao;
+  col += alb * skyC * (0.55 + 0.45 * n.y) * ao;
+
+  // three-point extras: cool edge rim and a warm bounce off the boards
+  float edge = pow(clamp(dot(n, Le), 0.0, 1.0), 2.0);
+  col += edgeC * edge * 1.10 * ao;
+  col += alb * bounceC * clamp(dot(n, Lb), 0.0, 1.0) * 0.65 * ao;
+
+  // gummy candy: probe into the body for thickness, then bleed light through it
+  float depth = -mapChar(p + rd * 0.26);
+  float thin = exp(-max(depth, 0.0) * 3.4);
+  float back = pow(clamp(dot(rd, L), 0.0, 1.0), 1.6);
+
+  float glow = 0.080 + 0.95 * back;
+  col += sssTint * glow * (0.40 + 0.60 * thin) * (0.40 + 0.60 * ao) * 0.80;
+  col += sssTint * (0.075 + 0.13 * thin) * ao;
+  col += sssTint * (1.0 - wrap) * (0.22 + 0.45 * thin) * 0.55;
+
+  // wet candy highlight: soft glint plus a broad sheen
+  vec3 hv = normalize(L - rd);
+  float nh = clamp(dot(n, hv), 0.0, 1.0);
+  col += keyC * (pow(nh, 160.0) * 0.45 + pow(nh, 26.0) * 0.12);
+
+  float fres = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
+  col += edgeC * fres * 0.55 * ao;
+  col += mix(vec3(1.0, 0.92, 0.86), sssTint, 0.95) * fres * (0.15 + 0.20 * thin) * ao;
+
+  col = faceDecals(col, p, hc, n);
+  return col;
+}
+
+vec3 shadeMic(vec3 p, vec3 n, vec3 rd, float ao, float mat) {
+  vec3 L  = normalize(vec3(0.45, 0.95, 0.55));
+  vec3 Le = normalize(vec3(-0.80, 0.50, -0.60));
+  vec3 keyC  = vec3(1.55, 1.36, 1.08);
+  vec3 edgeC = vec3(0.42, 0.60, 1.00);
+
+  vec3 hv = normalize(L - rd);
+  float nh = clamp(dot(n, hv), 0.0, 1.0);
+  float fres = pow(1.0 - clamp(dot(n, -rd), 0.0, 1.0), 3.0);
+
+  vec3 base;
+  float gloss, specI;
+  if (mat < 1.5) { base = vec3(0.50, 0.51, 0.55); gloss = 180.0; specI = 1.5; }
+  else if (mat < 2.5) { base = vec3(0.055, 0.055, 0.065); gloss = 90.0; specI = 0.9; }
+  else { base = vec3(0.018, 0.017, 0.020); gloss = 36.0; specI = 0.22; }
+
+  // fake studio environment: warm below, cool above
+  vec3 env = mix(vec3(0.020, 0.018, 0.022), vec3(0.55, 0.58, 0.66), smoothstep(-0.7, 0.9, n.y));
+  env += vec3(0.18, 0.05, 0.03) * (1.0 - smoothstep(-0.2, 0.8, n.y));
+
+  vec3 col = base * (0.25 + 0.75 * env);
+  col += keyC * pow(nh, gloss) * specI;
+  col += edgeC * fres * 0.60;
+  col += base * 0.12 * ao;
+
+  if (mat > 1.5 && mat < 2.5) {
+    // grille and chrome caps on the ribbon head
+    vec3 q = micLocal(p);
+    float face = smoothstep(0.030, 0.038, abs(q.z))
+               * (1.0 - smoothstep(0.052, 0.064, abs(q.x)))
+               * (1.0 - smoothstep(0.074, 0.088, abs(q.y)));
+    float ribs = smoothstep(0.30, 0.70, 0.5 + 0.5 * sin(q.y * 170.0));
+    vec3 grille = vec3(0.52, 0.53, 0.57) * (0.55 + 0.45 * ribs);
+    grille += keyC * pow(nh, 120.0) * 0.9;
+    grille += edgeC * fres * 0.25;
+    col = mix(col, grille, face * 0.92);
+
+    float cap = smoothstep(0.080, 0.090, abs(q.y));
+    vec3 chrome = vec3(0.55, 0.56, 0.60) * (0.45 + 0.55 * env) + keyC * pow(nh, 220.0) * 1.2;
+    col = mix(col, chrome, cap);
+  }
+  return col;
+}
+
+vec3 shadeFloor(vec3 p, vec3 rd, float contactAO) {
+  vec3 L = normalize(vec3(0.45, 0.95, 0.55));
+  float sh = 1.0;
+  if (length(p.xz) < 6.0) sh = softShadow(p + vec3(0.0, 0.01, 0.0), L, 0.04, 5.0, 12.0);
+
+  float r = length(p.xz);
+  vec3 alb = woodColor(p.xz);
+  float pool = exp(-(p.x * p.x * 0.13 + (p.z - 0.20) * (p.z - 0.20) * 0.20));
+
+  vec3 col = alb * vec3(1.55, 1.36, 1.08) * (0.30 + 1.15 * pool) * sh;
+  col += alb * vec3(0.080, 0.060, 0.050) * 0.50;
+  col *= mix(0.40, 1.0, contactAO);
+  col += vec3(0.050, 0.006, 0.007) * exp(-r * r * 1.6) * (0.5 + 0.5 * contactAO);
+  col += vec3(0.055, 0.005, 0.006) * (1.0 - contactAO) * exp(-r * r * 1.2);
+  return col;
+}
+
+/* ---------- main ---------- */
+
+void main() {
+  vec2 uv = gl_FragCoord.xy / uRes;
+  vec3 ro = uCam;
+  vec3 ww = normalize(uTarget - ro);
+  vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));
+  vec3 vv = cross(uu, ww);
+
+  vec2 q = (2.0 * gl_FragCoord.xy - uRes) / uRes.y;
+  // widen the lens on tall/narrow screens so his arms stay in frame
+  float lens = 3.2 * min(1.0, (uRes.x / uRes.y) / 0.8);
+  vec3 rd = normalize(q.x * uu + q.y * vv + lens * ww);
+
+  vec3 col = backdrop(ro, rd);
+
+  vec2 hit = raymarch(ro, rd, 14.0);
+  float tC = hit.x;
+
+  float tP = -1.0;
+  if (rd.y < -1e-4) {
+    float tp = (FLOOR_Y - ro.y) / rd.y;
+    if (tp > 0.0) tP = tp;
+  }
+
+  if (tP > 0.0 && (tC < 0.0 || tP < tC)) {
+    vec3 p = ro + rd * tP;
+    float contactAO = smoothstep(0.0, 0.95, sceneMap(p + vec3(0.0, 0.03, 0.0)).x);
+    vec3 fc = shadeFloor(p, rd, contactAO);
+    float fog = 1.0 - exp(-0.030 * tP * tP);
+    col = mix(fc, backdrop(ro, rd), clamp(fog, 0.0, 1.0));
+  } else if (tC > 0.0) {
+    vec3 p = ro + rd * tC;
+    vec3 n = calcNormal(p);
+    float ao = calcAO(p, n);
+    col = (hit.y < 0.5) ? shadeChar(p, n, rd, ao) : shadeMic(p, n, rd, ao, hit.y);
+    // fade him into the backdrop at enormous distances (never really happens)
+    col = mix(col, backdrop(ro, rd), 1.0 - exp(-0.008 * tC * tC));
+  }
+
+  // gentle vignette + grain to keep the soft gradient clean
+  float vig = 1.0 - 0.34 * pow(length((uv - 0.5) * vec2(1.22, 1.0)), 1.7);
+  col *= clamp(vig, 0.0, 1.0);
+  col += (hash12(gl_FragCoord.xy) - 0.5) * 0.004;
+  col = clamp(col, 0.0, 1.0);
+
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<script src="bob-lipsync.js"></script>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const fallback = document.getElementById('fallback');
+
+  const gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    depth: false,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: false
+  });
+
+  if (!gl) {
+    fallback.classList.add('show');
+    return;
+  }
+
+  /* ---------- shader plumbing ---------- */
+
+  function compile(type, source, label) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, source);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      console.error(`Shader compile failed (${label}):\n${log}`);
+      throw new Error(`${label} shader: ${log}`);
+    }
+    return sh;
+  }
+
+  const vs = compile(gl.VERTEX_SHADER, document.getElementById('vert').textContent, 'vertex');
+  const fs = compile(gl.FRAGMENT_SHADER, document.getElementById('frag').textContent, 'fragment');
+
+  const program = gl.createProgram();
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    const log = gl.getProgramInfoLog(program);
+    console.error('Program link failed:\n' + log);
+    fallback.classList.add('show');
+    return;
+  }
+  gl.useProgram(program);
+
+  const U = {
+    res: gl.getUniformLocation(program, 'uRes'),
+    time: gl.getUniformLocation(program, 'uTime'),
+    poke: gl.getUniformLocation(program, 'uPoke'),
+    cam: gl.getUniformLocation(program, 'uCam'),
+    target: gl.getUniformLocation(program, 'uTarget'),
+    look: gl.getUniformLocation(program, 'uLook'),
+    blink: gl.getUniformLocation(program, 'uBlink'),
+    mouth: gl.getUniformLocation(program, 'uMouth'),
+    dance: gl.getUniformLocation(program, 'uDance'),
+    speak: gl.getUniformLocation(program, 'uSpeak'),
+    visW: gl.getUniformLocation(program, 'uVisW'),
+    visH: gl.getUniformLocation(program, 'uVisH'),
+    visCorner: gl.getUniformLocation(program, 'uVisCorner'),
+    visTeeth: gl.getUniformLocation(program, 'uVisTeeth'),
+    visTongue: gl.getUniformLocation(program, 'uVisTongue')
+  };
+
+  /* ---------- camera state ---------- */
+
+  const target = [0, 0.88, 0];
+  const qs = new URLSearchParams(location.search);
+  const num = (v, fallback) => Number.isFinite(parseFloat(v)) ? parseFloat(v) : fallback;
+  const HOME = { yaw: num(qs.get('yaw'), 0.34), pitch: num(qs.get('pitch'), 0.11), dist: num(qs.get('dist'), 5.3) };
+  let yaw = HOME.yaw;
+  let pitch = HOME.pitch;
+  let dist = HOME.dist;
+
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let lastInteraction = performance.now();
+  let poke = 0;
+  let pokeTarget = 0;
+
+  // face performance: pupils, blinks, and mouth moods
+  let look = 0;
+  let lookTarget = 0;
+  let lookTimer = 1.4;
+  let blinkT = -1;
+  let blinkCooldown = 2.4;
+  let mouth = 0;                 // 0 smile, 1 frown, 2 'o'
+  let pendingMood = -1;
+  let moodTimer = 5.0;
+
+  const moodDuration = (m) => m === 2 ? 1.6 + Math.random() * 1.4
+                         : m === 1 ? 2.8 + Math.random() * 2.4
+                         : 4.5 + Math.random() * 3.5;
+
+  /* ---------- visemes ---------- */
+  // 15-shape set (sil, PP, FF, TH, DD, kk, CH, SS, nn, RR, aa, E, I, O, U)
+  const VISEMES = [
+    /* 0  sil */ { w: 0.080, h: 0.008, c: 0.020, teeth: 0.00, tongue: 0.00 },
+    /* 1  PP  */ { w: 0.075, h: 0.006, c: 0.000, teeth: 0.00, tongue: 0.00 },
+    /* 2  FF  */ { w: 0.085, h: 0.022, c: 0.005, teeth: 0.90, tongue: 0.08 },
+    /* 3  TH  */ { w: 0.085, h: 0.036, c: 0.005, teeth: 0.20, tongue: 0.95 },
+    /* 4  DD  */ { w: 0.085, h: 0.048, c: 0.010, teeth: 0.55, tongue: 0.35 },
+    /* 5  kk  */ { w: 0.075, h: 0.040, c: 0.000, teeth: 0.15, tongue: 0.15 },
+    /* 6  CH  */ { w: 0.065, h: 0.045, c: 0.000, teeth: 0.20, tongue: 0.20 },
+    /* 7  SS  */ { w: 0.100, h: 0.026, c: 0.020, teeth: 0.95, tongue: 0.00 },
+    /* 8  nn  */ { w: 0.080, h: 0.020, c: 0.008, teeth: 0.10, tongue: 0.55 },
+    /* 9  RR  */ { w: 0.070, h: 0.030, c: 0.005, teeth: 0.20, tongue: 0.25 },
+    /* 10 aa  */ { w: 0.095, h: 0.072, c: 0.000, teeth: 0.10, tongue: 0.30 },
+    /* 11 E   */ { w: 0.105, h: 0.045, c: 0.020, teeth: 0.55, tongue: 0.08 },
+    /* 12 I   */ { w: 0.098, h: 0.030, c: 0.020, teeth: 0.70, tongue: 0.00 },
+    /* 13 O   */ { w: 0.062, h: 0.058, c: 0.000, teeth: 0.00, tongue: 0.18 },
+    /* 14 U   */ { w: 0.050, h: 0.048, c: 0.000, teeth: 0.00, tongue: 0.10 }
+  ];
+
+  // vocal warm-up: cycles all 15 shapes while he dances
+  const SONG = [
+    [10, 0.22], [7, 0.14], [11, 0.18], [1, 0.10],
+    [4, 0.12], [11, 0.16], [2, 0.12], [12, 0.16],
+    [3, 0.12], [13, 0.18], [5, 0.10], [14, 0.18],
+    [6, 0.12], [10, 0.20], [8, 0.12], [11, 0.16],
+    [9, 0.12], [7, 0.14], [12, 0.16], [0, 0.10]
+  ];
+  const SONG_LEN = SONG.reduce((sum, [, d]) => sum + d, 0);
+
+  function visemeAt(t) {
+    let p = t % SONG_LEN;
+    for (const [index, dur] of SONG) {
+      if (p < dur) return VISEMES[index];
+      p -= dur;
+    }
+    return VISEMES[0];
+  }
+
+  function pickLook() {
+    const options = [-1, 0, 1].filter(v => v !== lookTarget);
+    lookTarget = options[Math.floor(Math.random() * options.length)];
+    lookTimer = 1.6 + Math.random() * 2.4;
+  }
+
+  const pointers = new Map();
+  let drag = null;
+  let pinch = null;
+
+  let renderScale = 1;
+  const perf = { acc: 0, n: 0 };
+
+  function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+  const smooth01 = (x) => {
+    x = clamp(x, 0, 1);
+    return x * x * (3 - 2 * x);
+  };
+
+  function setSize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5) * renderScale;
+    const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+    const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      gl.viewport(0, 0, w, h);
+    }
+  }
+  window.addEventListener('resize', setSize, { passive: true });
+  setSize();
+
+  /* ---------- input ---------- */
+
+  const now = () => performance.now();
+
+  /* ---------- Bob's voice ---------- */
+
+  const voice = document.getElementById('voice');
+  const voiceBtn = document.getElementById('voiceBtn');
+  const lipTrack = (typeof BOB_LIPSYNC !== 'undefined') ? BOB_LIPSYNC : null;
+  let introPlaying = false;
+
+  function setVoiceButton(playing) {
+    introPlaying = playing;
+    voiceBtn.textContent = playing ? '■ Stop' : '▶ Hear Bob';
+    voiceBtn.classList.toggle('playing', playing);
+  }
+
+  voiceBtn.addEventListener('click', async () => {
+    if (!voice.paused) {
+      voice.pause();
+      return;
+    }
+    voice.currentTime = 0;
+    try {
+      await voice.play();
+    } catch (err) {
+      console.warn('Voice playback was blocked:', err);
+    }
+  });
+
+  voice.addEventListener('play', () => {
+    setVoiceButton(true);
+    lastInteraction = now();
+  });
+  voice.addEventListener('pause', () => setVoiceButton(false));
+  voice.addEventListener('ended', () => {
+    setVoiceButton(false);
+    lastInteraction = now();
+  });
+  voice.addEventListener('error', () => {
+    setVoiceButton(false);
+    voiceBtn.textContent = 'Audio unavailable';
+    voiceBtn.disabled = true;
+  });
+
+  function pinchState() {
+    const [a, b] = [...pointers.values()];
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      x: (a.x + b.x) * 0.5,
+      y: (a.y + b.y) * 0.5
+    };
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    lastInteraction = now();
+
+    if (pointers.size === 1) {
+      drag = { x: e.clientX, y: e.clientY, moved: 0, t: now() };
+      pinch = null;
+    } else {
+      drag = null;
+      pinch = pinchState();
+    }
+    canvas.classList.add('dragging');
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const p = pointers.get(e.pointerId);
+    if (!p) return;
+    p.x = e.clientX;
+    p.y = e.clientY;
+
+    if (pointers.size === 1 && drag) {
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      drag.x = e.clientX;
+      drag.y = e.clientY;
+      drag.moved += Math.abs(dx) + Math.abs(dy);
+      yaw -= dx * 0.006;
+      pitch = clamp(pitch + dy * 0.005, -0.22, 1.05);
+    } else if (pointers.size >= 2 && pinch) {
+      const s = pinchState();
+      if (s.dist > 1 && pinch.dist > 1) dist = clamp(dist * pinch.dist / s.dist, 3.1, 9.0);
+      yaw -= (s.x - pinch.x) * 0.005;
+      pitch = clamp(pitch + (s.y - pinch.y) * 0.004, -0.22, 1.05);
+      pinch = s;
+    }
+    lastInteraction = now();
+  });
+
+  function endPointer(e) {
+    if (!pointers.has(e.pointerId)) return;
+    const wasLast = pointers.size === 1;
+    pointers.delete(e.pointerId);
+
+    if (wasLast && drag) {
+      if (drag.moved < 9 && now() - drag.t < 450) {
+        poke = 1;
+        pokeTarget = 1;
+      }
+      drag = null;
+    }
+    if (pointers.size < 2) pinch = null;
+    if (pointers.size === 0) canvas.classList.remove('dragging');
+    lastInteraction = now();
+  }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    dist = clamp(dist * Math.exp(e.deltaY * 0.0011), 3.1, 9.0);
+    lastInteraction = now();
+  }, { passive: false });
+
+  canvas.addEventListener('dblclick', () => {
+    yaw = HOME.yaw;
+    pitch = HOME.pitch;
+    dist = HOME.dist;
+    lastInteraction = now();
+  });
+
+  /* ---------- render loop ---------- */
+
+  const clock = { start: now(), prev: now() };
+
+  function frame(t) {
+    setSize();
+
+    const rawDt = (t - clock.prev) / 1000;
+    const dt = Math.min(0.05, rawDt);
+    clock.prev = t;
+    const time = (t - clock.start) / 1000;
+
+    // every 13s: about five seconds of dancing, then a little rest
+    const danceCycle = time % 13.0;
+    let dance = smooth01(danceCycle / 0.7) * (1.0 - smooth01((danceCycle - 5.0) / 0.8));
+    let singing = dance > 0.5;
+    let vis = visemeAt(danceCycle);
+
+    // Bob's spoken intro: freeze the dance and follow the pre-baked lip sync
+    if (introPlaying) {
+      dance = 0.0;
+      singing = true;
+      if (lipTrack) {
+        const frame = Math.min(voice.currentTime, lipTrack.duration) * lipTrack.fps;
+        const i = Math.max(0, Math.min(lipTrack.frames.length - 1, Math.floor(frame)));
+        const j = Math.min(lipTrack.frames.length - 1, i + 1);
+        const k = Math.min(1, Math.max(0, frame - i));
+        const a = lipTrack.frames[i];
+        const b = lipTrack.frames[j];
+        vis = {
+          w: a[0] + (b[0] - a[0]) * k,
+          h: a[1] + (b[1] - a[1]) * k,
+          c: a[2] + (b[2] - a[2]) * k,
+          teeth: a[3] + (b[3] - a[3]) * k,
+          tongue: a[4] + (b[4] - a[4]) * k
+        };
+      }
+    }
+
+    // poke spring: a quick squish that wobbles out
+    poke += (pokeTarget - poke) * Math.min(1, dt * 3.5);
+    if (pokeTarget > 0.9 && poke > 0.9) pokeTarget = 0;
+
+    // face performance: look around, blink, and swap mouths behind closed eyes
+    lookTimer -= dt;
+    if (lookTimer <= 0) pickLook();
+    look += (lookTarget - look) * Math.min(1, dt * 7);
+
+    blinkCooldown -= dt;
+    if (pendingMood >= 0 && blinkT < 0) blinkT = 0;
+    if (blinkT < 0 && blinkCooldown <= 0) blinkT = 0;
+
+    let blink = 0;
+    if (blinkT >= 0) {
+      blinkT += dt;
+      const bp = Math.min(1, blinkT / 0.24);
+      blink = Math.sin(Math.PI * bp);
+      if (bp > 0.5 && pendingMood >= 0) {
+        mouth = pendingMood;
+        pendingMood = -1;
+        moodTimer = moodDuration(mouth);
+      }
+      if (bp >= 1) {
+        blinkT = -1;
+        blinkCooldown = 3.0 + Math.random() * 3.0;
+      }
+    }
+
+    moodTimer -= dt;
+    if (moodTimer <= 0 && pendingMood < 0) {
+      const options = [0, 1, 2].filter(m => m !== mouth);
+      pendingMood = options[Math.floor(Math.random() * options.length)];
+      moodTimer = 1e9;
+    }
+
+    // let him turn slowly when you leave him alone
+    if (!reduceMotion && !introPlaying && t - lastInteraction > 4500) yaw += dt * 0.10;
+
+    // drop resolution a little if the first second or so is choppy
+    if (rawDt < 0.25) { perf.acc += rawDt; perf.n++; }
+    if (perf.n >= 45) {
+      if (perf.acc / perf.n > 0.026 && renderScale > 0.65) {
+        renderScale = Math.max(0.65, renderScale * 0.85);
+      }
+      perf.acc = 0;
+      perf.n = 0;
+    }
+
+    const cp = Math.cos(pitch);
+    const cam = [
+      target[0] + Math.sin(yaw) * cp * dist,
+      target[1] + Math.sin(pitch) * dist,
+      target[2] + Math.cos(yaw) * cp * dist
+    ];
+
+    gl.uniform2f(U.res, canvas.width, canvas.height);
+    gl.uniform1f(U.time, time);
+    gl.uniform1f(U.poke, poke);
+    gl.uniform1f(U.look, look);
+    gl.uniform1f(U.blink, blink);
+    gl.uniform1f(U.mouth, mouth);
+    gl.uniform1f(U.dance, dance);
+    gl.uniform1f(U.speak, singing ? 1 : 0);
+    gl.uniform1f(U.visW, vis.w);
+    gl.uniform1f(U.visH, vis.h);
+    gl.uniform1f(U.visCorner, vis.c);
+    gl.uniform1f(U.visTeeth, vis.teeth);
+    gl.uniform1f(U.visTongue, vis.tongue);
+    gl.uniform3fv(U.cam, cam);
+    gl.uniform3fv(U.target, target);
+
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body>
+</html>
