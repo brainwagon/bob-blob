@@ -6,6 +6,14 @@ theatre stage, built from signed distance functions (SDFs) in a fragment shader.
 Open `index.html` in any modern browser — no build step or server. Keep
 `bob-intro.wav` and `bob-lipsync.js` beside it for the spoken intro.
 
+## Deploy to GitHub Pages
+
+The `Deploy to GitHub Pages` workflow publishes the app whenever a commit is
+pushed to `main`, or when started manually from the Actions tab. In the
+repository settings, set **Pages → Build and deployment → Source** to
+**GitHub Actions**. The published site will be available at
+https://brainwagon.github.io/bob-blob/.
+
 ## Controls
 
 | Action | What happens |
